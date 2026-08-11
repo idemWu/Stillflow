@@ -1,0 +1,34 @@
+{
+  "name": "jingliu-video-exporter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "yarn@1.22.22",
+  "scripts": {
+    "dev": "node node_modules/concurrently/dist/bin/index.js -k -n API,WEB -c cyan,green \"yarn run dev:server\" \"yarn run dev:client\"",
+    "dev:server": "node node_modules/tsx/dist/cli.mjs watch src/server/index.ts",
+    "dev:client": "node node_modules/vite/bin/vite.js",
+    "build": "node node_modules/typescript/bin/tsc -p tsconfig.server.json --noEmit && node node_modules/typescript/bin/tsc -p tsconfig.client.json --noEmit && node node_modules/vite/bin/vite.js build",
+    "start": "node node_modules/tsx/dist/cli.mjs src/server/index.ts",
+    "test": "node node_modules/tsx/dist/cli.mjs --test tests/security.test.ts tests/media.test.ts",
+    "setup:engine": "node scripts/setup-engine.mjs"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "helmet": "^8.3.0",
+    "lucide-react": "^1.31.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "concurrently": "^10.0.4",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1"
+  }
+}
