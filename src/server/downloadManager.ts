@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { IDownloadJob, IDownloadProgress } from '../shared/types.js';
 import { AppError, classifyEngineError, toApiError } from './errors.js';
 import { requireEngine, spawnEngine } from './engine.js';
+import { fetchTrustedKuaishouMedia } from './kuaishou.js';
 import type { IProbeRecord } from './probeManager.js';
 
 interface IJobInput {
@@ -20,6 +21,7 @@ interface IInternalJob {
   directory: string;
   filePath: string | null;
   childPid: number | null;
+  abortController: AbortController | null;
   timer: NodeJS.Timeout | null;
   quotaTimer: NodeJS.Timeout | null;
   quotaCheckInFlight: boolean;
@@ -52,6 +54,10 @@ function emptyProgress(): IDownloadProgress {
   };
 }
 
+function hasTerminalFailureStatus(status: IDownloadJob['status']): boolean {
+  return status === 'cancelled' || status === 'failed';
+}
+
 function isPathInside(parent: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(parent), path.resolve(candidate));
   return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
@@ -70,8 +76,9 @@ function toFiniteNumber(value: string | undefined): number | null {
 function sanitizeDownloadName(value: string): string {
   const cleaned = value
     .replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '')
-    .replace(/[\\/]+/g, '-')
-    .trim();
+    .replace(/[<>:"/\\|?*]+/g, '-')
+    .trim()
+    .replace(/[. ]+$/g, '');
   return cleaned.slice(0, 180) || 'video.mp4';
 }
 
@@ -79,6 +86,10 @@ export function buildFormatExpression(rawFormatId: string, hasAudio: boolean): s
   return hasAudio
     ? rawFormatId
     : `${rawFormatId}+ba[ext=m4a]/${rawFormatId}+ba/${rawFormatId}`;
+}
+
+export function buildSingleMediaArguments(): string[] {
+  return ['--no-playlist'];
 }
 
 function parseProgressLine(job: IInternalJob, line: string): void {
@@ -241,87 +252,182 @@ async function findOutputFile(job: IInternalJob): Promise<string | null> {
   return files.length === 1 ? files[0] : null;
 }
 
+async function downloadDirectSource(job: IInternalJob): Promise<void> {
+  const source = job.input.probe.downloadSource;
+  if (source.mode !== 'direct' || !source.referer) throw new AppError('DOWNLOAD_FAILED', 502);
+
+  const controller = new AbortController();
+  job.abortController = controller;
+  job.timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+  const title = sanitizeDownloadName(job.input.probe.media.title).slice(0, 120);
+  const sourceId = sanitizeDownloadName(job.input.probe.sourceId).slice(0, 80);
+  const outputPath = path.join(job.directory, `${title} [${sourceId}].mp4`);
+  const partialPath = `${outputPath}.part`;
+  const startedAt = Date.now();
+
+  try {
+    const response = await fetchTrustedKuaishouMedia(source.url, {
+      referer: source.referer,
+      userAgent: source.userAgent ?? undefined,
+      signal: controller.signal,
+    });
+    if (!response.body) throw new AppError('DOWNLOAD_FAILED', 502);
+
+    const declaredBytes = Number(response.headers.get('content-length'));
+    const totalBytes = Number.isFinite(declaredBytes) && declaredBytes > 0 ? declaredBytes : null;
+    if (totalBytes && totalBytes > MAX_FILE_SIZE_BYTES) {
+      await response.body.cancel().catch(() => undefined);
+      throw new AppError('FILE_TOO_LARGE', 413);
+    }
+
+    const reader = response.body.getReader();
+    const file = await open(partialPath, 'wx').catch(async (error: unknown) => {
+      await reader.cancel().catch(() => undefined);
+      throw error;
+    });
+    let downloadedBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        downloadedBytes += value.byteLength;
+        if (downloadedBytes > MAX_FILE_SIZE_BYTES) {
+          await reader.cancel().catch(() => undefined);
+          throw new AppError('FILE_TOO_LARGE', 413);
+        }
+
+        let writtenBytes = 0;
+        while (writtenBytes < value.byteLength) {
+          const result = await file.write(
+            value,
+            writtenBytes,
+            value.byteLength - writtenBytes,
+          );
+          writtenBytes += result.bytesWritten;
+        }
+
+        const elapsedSeconds = Math.max((Date.now() - startedAt) / 1_000, 0.001);
+        const speedBytesPerSecond = downloadedBytes / elapsedSeconds;
+        const remainingBytes = totalBytes ? Math.max(0, totalBytes - downloadedBytes) : null;
+        job.public.progress = {
+          percent: totalBytes ? Math.min(99.9, (downloadedBytes / totalBytes) * 100) : null,
+          downloadedBytes,
+          totalBytes,
+          speedBytesPerSecond,
+          etaSeconds: remainingBytes === null ? null : remainingBytes / speedBytesPerSecond,
+        };
+      }
+      if (downloadedBytes === 0) throw new AppError('DOWNLOAD_FAILED', 502);
+      if (totalBytes !== null && downloadedBytes !== totalBytes) {
+        throw new AppError('DOWNLOAD_FAILED', 502);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => undefined);
+      throw error;
+    } finally {
+      await file.close();
+    }
+
+    await rename(partialPath, outputPath);
+    job.filePath = outputPath;
+  } catch (error) {
+    if (controller.signal.aborted && job.public.status !== 'cancelled') {
+      throw new AppError('DOWNLOAD_FAILED', 504);
+    }
+    if (error instanceof AppError) throw error;
+    throw new AppError('DOWNLOAD_FAILED', 502);
+  } finally {
+    job.abortController = null;
+  }
+}
+
 async function runJob(job: IInternalJob): Promise<void> {
   const requestId = randomUUID();
   try {
     await mkdir(job.directory, { recursive: true });
-    const engine = await requireEngine();
-    const formatExpression = buildFormatExpression(job.input.rawFormatId, job.input.hasAudio);
-    const outputTemplate = path.join(job.directory, '%(title).120B [%(id)s].%(ext)s');
-    const args = [
-      '--ignore-config',
-      '--no-plugin-dirs',
-      '--no-update',
-      '--no-playlist',
-      '--default-search',
-      'error',
-      '--no-cache-dir',
-      '--newline',
-      '--progress',
-      '--progress-delta',
-      '0.5',
-      '--progress-template',
-      'download:__PROGRESS__%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s',
-      '--progress-template',
-      'postprocess:__POSTPROCESS__%(progress.status)s',
-      '--print',
-      'after_move:__FINAL_FILE__%(filepath)s',
-      '--socket-timeout',
-      '15',
-      '--retries',
-      '2',
-      '--fragment-retries',
-      '2',
-      '--extractor-retries',
-      '2',
-      '--max-filesize',
-      `${MAX_FILE_SIZE_MB}M`,
-      '--max-downloads',
-      '1',
-      '--windows-filenames',
-      '--trim-filenames',
-      '160',
-      '--format',
-      formatExpression,
-      '--merge-output-format',
-      'mp4',
-      '--output',
-      outputTemplate,
-    ];
-    if (engine.ffmpegPath) args.push('--ffmpeg-location', engine.ffmpegPath);
-    args.push('--', job.input.probe.url);
-
+    const source = job.input.probe.downloadSource;
     job.public.status = 'downloading';
-    const child = spawnEngine(engine, args);
-    job.childPid = child.pid ?? null;
-    startQuotaMonitor(job);
-    let stderr = '';
-    consumeLines(child.stdout, (line) => parseProgressLine(job, line), () => undefined);
-    consumeLines(
-      child.stderr,
-      (line) => parseProgressLine(job, line),
-      (text) => {
-        stderr = `${stderr}${text}`.slice(-100_000);
-      },
-    );
+    if (source.mode === 'direct') {
+      await downloadDirectSource(job);
+    } else {
+      const engine = await requireEngine();
+      const formatExpression = buildFormatExpression(job.input.rawFormatId, job.input.hasAudio);
+      const outputTemplate = path.join(job.directory, '%(title).120B [%(id)s].%(ext)s');
+      const args = [
+        '--ignore-config',
+        '--no-plugin-dirs',
+        '--no-update',
+        ...buildSingleMediaArguments(),
+        '--default-search',
+        'error',
+        '--no-cache-dir',
+        '--newline',
+        '--progress',
+        '--progress-delta',
+        '0.5',
+        '--progress-template',
+        'download:__PROGRESS__%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s',
+        '--progress-template',
+        'postprocess:__POSTPROCESS__%(progress.status)s',
+        '--print',
+        'after_move:__FINAL_FILE__%(filepath)s',
+        '--socket-timeout',
+        '15',
+        '--retries',
+        '2',
+        '--fragment-retries',
+        '2',
+        '--extractor-retries',
+        '2',
+        '--max-filesize',
+        `${MAX_FILE_SIZE_MB}M`,
+        '--windows-filenames',
+        '--trim-filenames',
+        '160',
+        '--format',
+        formatExpression,
+        '--merge-output-format',
+        'mp4',
+        '--output',
+        outputTemplate,
+      ];
+      if (engine.ffmpegPath) args.push('--ffmpeg-location', engine.ffmpegPath);
+      args.push('--', source.url);
 
-    await new Promise<void>((resolve, reject) => {
-      job.timer = setTimeout(() => {
-        void terminateProcessTree(job.childPid)
-          .finally(() => reject(new AppError('DOWNLOAD_FAILED', 504)));
-      }, DOWNLOAD_TIMEOUT_MS);
-      child.on('error', () => reject(new AppError('ENGINE_MISSING', 503)));
-      child.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(classifyEngineError(stderr));
+      const child = spawnEngine(engine, args);
+      job.childPid = child.pid ?? null;
+      startQuotaMonitor(job);
+      let stderr = '';
+      consumeLines(child.stdout, (line) => parseProgressLine(job, line), () => undefined);
+      consumeLines(
+        child.stderr,
+        (line) => parseProgressLine(job, line),
+        (text) => {
+          stderr = `${stderr}${text}`.slice(-100_000);
+        },
+      );
+
+      await new Promise<void>((resolve, reject) => {
+        job.timer = setTimeout(() => {
+          void terminateProcessTree(job.childPid)
+            .finally(() => reject(new AppError('DOWNLOAD_FAILED', 504)));
+        }, DOWNLOAD_TIMEOUT_MS);
+        child.on('error', () => reject(new AppError('ENGINE_MISSING', 503)));
+        child.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(classifyEngineError(stderr));
+        });
       });
-    });
+    }
 
     clearJobTimers(job);
     job.childPid = null;
     const filePath = await findOutputFile(job);
     if (!filePath) throw new AppError('DOWNLOAD_FAILED', 502);
     const info = await stat(filePath);
+    if (hasTerminalFailureStatus(job.public.status)) {
+      throw new AppError('DOWNLOAD_FAILED', 409);
+    }
     if (!info.isFile() || info.size > MAX_FILE_SIZE_BYTES) throw new AppError('FILE_TOO_LARGE', 413);
 
     job.filePath = filePath;
@@ -377,6 +483,7 @@ export function createDownloadJob(probe: IProbeRecord, rawFormatId: string, hasA
     directory: path.join(JOBS_ROOT, id),
     filePath: null,
     childPid: null,
+    abortController: null,
     timer: null,
     quotaTimer: null,
     quotaCheckInFlight: false,
@@ -414,7 +521,10 @@ export async function cancelJob(id: unknown, reason?: AppError): Promise<void> {
   job.public.status = reason ? 'failed' : 'cancelled';
   job.public.error = reason ? toApiError(reason, randomUUID()) : null;
   const childPid = job.childPid;
+  const abortController = job.abortController;
   clearJobTimers(job);
+  job.abortController = null;
+  abortController?.abort();
   await terminateProcessTree(childPid);
   job.childPid = null;
   await rm(job.directory, { recursive: true, force: true }).catch(() => undefined);

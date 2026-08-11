@@ -121,7 +121,6 @@ export function normalizeMediaInfo(rawData: unknown, requestedUrl: string): IMed
   const title = asString(data.title);
   if (!id || !title) throw new AppError('UNAVAILABLE', 422);
 
-  const sourceUrl = asString(data.webpage_url) ?? requestedUrl;
   const formats = normalizeFormats(data.formats);
   if (formats.length === 0) throw new AppError('UNSUPPORTED', 422);
 
@@ -134,7 +133,7 @@ export function normalizeMediaInfo(rawData: unknown, requestedUrl: string): IMed
     thumbnailUrl: getThumbnail(data),
     publishedAt: asString(data.upload_date) ?? asString(data.release_date),
     viewCount: asNumber(data.view_count),
-    platform: detectPlatform(sourceUrl),
+    platform: detectPlatform(requestedUrl),
     formats,
     originalUrl: requestedUrl,
   };

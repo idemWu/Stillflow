@@ -6,7 +6,7 @@ const ERROR_MESSAGES: Record<ApiErrorCode, string> = {
   PRIVATE_ADDRESS: '出于安全原因，不能解析本机或内网地址。',
   ENGINE_MISSING: '解析引擎尚未安装，请先运行 yarn run setup:engine。',
   FFMPEG_MISSING: '该清晰度需要 FFmpeg 合并音视频，请先安装本地解析引擎。',
-  AUTH_REQUIRED: '该内容需要登录，净流仅处理无需登录的公开内容。',
+  AUTH_REQUIRED: '该内容需要来源平台验证或登录，净流仅处理无需账号的公开内容。',
   PRIVATE_CONTENT: '该内容不是公开内容，无法解析。',
   GEO_RESTRICTED: '该内容在当前地区不可用。',
   RATE_LIMITED: '来源平台暂时拒绝访问，请稍后重试。',
@@ -41,6 +41,7 @@ export function classifyEngineError(rawOutput: string): AppError {
   if (
     output.includes('sign in to confirm') ||
     output.includes('login required') ||
+    output.includes('fresh cookies') ||
     output.includes('cookies from browser') ||
     output.includes('authentication required')
   ) {

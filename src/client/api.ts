@@ -1,16 +1,17 @@
 import type {
+  ApiErrorCode,
   IApiErrorResponse,
   ICreateDownloadResponse,
   IDownloadJob,
   IHealthResponse,
   IProbeResponse,
-} from '../shared/types';
+} from '../shared/types.js';
 
 export class ApiClientError extends Error {
-  readonly code: string;
+  readonly code: ApiErrorCode;
   readonly requestId: string | null;
 
-  constructor(message: string, code = 'INTERNAL_ERROR', requestId: string | null = null) {
+  constructor(message: string, code: ApiErrorCode = 'INTERNAL_ERROR', requestId: string | null = null) {
     super(message);
     this.name = 'ApiClientError';
     this.code = code;

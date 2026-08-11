@@ -358,12 +358,6 @@ img {
   color: var(--green);
 }
 
-.platform-pills .more-platforms {
-  color: var(--faint);
-  background: transparent;
-  border-style: dashed;
-}
-
 .workbench-shell {
   position: relative;
   min-width: 0;
@@ -1871,10 +1865,6 @@ img {
   .capability-list {
     display: grid;
     grid-template-columns: 1fr;
-  }
-
-  .platform-pills span:nth-child(n + 5):not(.more-platforms) {
-    display: none;
   }
 
   .workbench-heading {

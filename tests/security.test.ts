@@ -33,7 +33,16 @@ test('classifies special network ranges as private', () => {
   assert.equal(isPrivateAddress('100.64.0.1'), true);
   assert.equal(isPrivateAddress('169.254.169.254'), true);
   assert.equal(isPrivateAddress('198.51.100.7'), true);
+  assert.equal(isPrivateAddress('::ffff:127.0.0.1'), true);
+  assert.equal(isPrivateAddress('::ffff:7f00:1'), true);
+  assert.equal(isPrivateAddress('::ffff:808:808'), false);
   assert.equal(isPrivateAddress('8.8.8.8'), false);
+});
+
+test('rejects hexadecimal IPv4-mapped IPv6 loopback URLs', () => {
+  assert.throws(() => validateUrlSyntax('http://[::ffff:127.0.0.1]/video'), (error: unknown) => {
+    return error instanceof AppError && error.code === 'PRIVATE_ADDRESS';
+  });
 });
 
 test('rejects non-standard ports, control characters, and unsafe format ids', () => {

@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { IMediaInfo } from '../shared/types.js';
+import { extractVideoUrlFromText } from '../shared/linkInput.js';
 import { AppError, classifyEngineError } from './errors.js';
 import { requireEngine, runEngineCapture } from './engine.js';
+import { KUAISHOU_USER_AGENT, probeKuaishou } from './kuaishou.js';
 import { normalizeMediaInfo } from './media.js';
 import { detectPlatform } from './platform.js';
 import { assertPublicMediaUrl } from './security.js';
@@ -17,6 +19,12 @@ export interface IProbeRecord {
   sourceId: string;
   media: IMediaInfo;
   options: Map<string, IStoredOption>;
+  downloadSource: {
+    mode: 'extractor' | 'direct';
+    url: string;
+    referer: string | null;
+    userAgent: string | null;
+  };
   expiresAt: number;
 }
 
@@ -52,12 +60,41 @@ function assertAllowedSource(rawData: unknown, url: string): void {
 }
 
 export async function createProbe(rawUrl: unknown): Promise<IProbeRecord> {
-  const parsedUrl = await assertPublicMediaUrl(rawUrl);
-  if (detectPlatform(parsedUrl.href).id === 'other') {
+  const extractedUrl = extractVideoUrlFromText(rawUrl);
+  if (!extractedUrl) throw new AppError('INVALID_URL', 400);
+  const parsedUrl = await assertPublicMediaUrl(extractedUrl);
+  const requestedPlatform = detectPlatform(parsedUrl.href);
+  if (requestedPlatform.id === 'other') {
     throw new AppError('UNSUPPORTED', 422);
   }
 
   const engine = await requireEngine();
+  if (requestedPlatform.id === 'kuaishou') {
+    const result = await probeKuaishou(parsedUrl);
+    const optionId = randomUUID();
+    const format = result.media.formats[0];
+    if (!format) throw new AppError('UNSUPPORTED', 422);
+    const options = new Map<string, IStoredOption>([
+      [optionId, { rawFormatId: 'best', hasAudio: true }],
+    ]);
+    const record: IProbeRecord = {
+      id: randomUUID(),
+      url: parsedUrl.href,
+      sourceId: result.media.id,
+      media: { ...result.media, formats: [{ ...format, id: optionId }] },
+      options,
+      downloadSource: {
+        mode: 'direct',
+        url: result.downloadUrl,
+        referer: result.canonicalUrl,
+        userAgent: KUAISHOU_USER_AGENT,
+      },
+      expiresAt: Date.now() + PROBE_TTL_MS,
+    };
+    probes.set(record.id, record);
+    return record;
+  }
+
   let rawOutput: string;
   try {
     const result = await runEngineCapture(
@@ -113,6 +150,12 @@ export async function createProbe(rawUrl: unknown): Promise<IProbeRecord> {
     sourceId: normalized.id,
     media: { ...normalized, formats },
     options,
+    downloadSource: {
+      mode: 'extractor',
+      url: parsedUrl.href,
+      referer: null,
+      userAgent: null,
+    },
     expiresAt: Date.now() + PROBE_TTL_MS,
   };
   probes.set(record.id, record);

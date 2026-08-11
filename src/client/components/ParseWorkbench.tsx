@@ -27,13 +27,15 @@ import type {
   IPlatform,
   IProbeResponse,
 } from '../../shared/types';
+import { extractVideoUrlFromText } from '../../shared/linkInput';
+import { detectPlatform, PLATFORM_DEFINITIONS } from '../../shared/platforms';
 import {
   ApiClientError,
-  createDownload,
   createProbe,
   getDownloadFileUrl,
   getHealth,
 } from '../api';
+import { createDownloadWithProbeRecovery } from '../downloadRecovery';
 import { useDownloadJob } from '../hooks/useDownloadJob';
 
 interface IParseWorkbenchProps {
@@ -46,29 +48,11 @@ interface IPlatformHint extends IPlatform {
 
 type WorkbenchStatus = 'idle' | 'probing' | 'ready' | 'error';
 
-const PLATFORM_RULES: Array<Omit<IPlatformHint, 'host'> & { hosts: string[] }> = [
-  { id: 'youtube', label: 'YouTube', glyph: 'YT', hosts: ['youtube.com', 'youtu.be'] },
-  { id: 'x', label: 'X / Twitter', glyph: 'X', hosts: ['x.com', 'twitter.com'] },
-  { id: 'tiktok', label: 'TikTok', glyph: 'TT', hosts: ['tiktok.com'] },
-  { id: 'instagram', label: 'Instagram', glyph: 'IG', hosts: ['instagram.com'] },
-  { id: 'vimeo', label: 'Vimeo', glyph: 'VM', hosts: ['vimeo.com'] },
-  { id: 'bilibili', label: 'Bilibili', glyph: 'B', hosts: ['bilibili.com', 'b23.tv'] },
-  { id: 'douyin', label: '抖音', glyph: 'DY', hosts: ['douyin.com', 'iesdouyin.com'] },
-  { id: 'kuaishou', label: '快手', glyph: 'KS', hosts: ['kuaishou.com', 'gifshow.com'] },
-];
-
 function detectPlatformHint(value: string): IPlatformHint | null {
-  try {
-    const parsed = new URL(value.trim());
-    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
-    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
-    const rule = PLATFORM_RULES.find(({ hosts }) =>
-      hosts.some((candidate) => host === candidate || host.endsWith(`.${candidate}`)),
-    );
-    return rule ? { id: rule.id, label: rule.label, glyph: rule.glyph, host } : null;
-  } catch {
-    return null;
-  }
+  const platform = detectPlatform(value);
+  if (platform.id === 'other') return null;
+  const definition = PLATFORM_DEFINITIONS.find(({ id }) => id === platform.id);
+  return definition ? { ...platform, glyph: definition.glyph } : null;
 }
 
 function formatDuration(seconds: number | null): string {
@@ -112,7 +96,7 @@ function MediaThumbnail({ media }: { media: IMediaInfo }): React.JSX.Element {
       )}
       <span className="duration-badge"><Clock3 size={12} />{formatDuration(media.durationSeconds)}</span>
       <span className={`platform-glyph platform-${media.platform.id}`}>
-        {PLATFORM_RULES.find((rule) => rule.id === media.platform.id)?.glyph ?? 'WEB'}
+        {PLATFORM_DEFINITIONS.find((rule) => rule.id === media.platform.id)?.glyph ?? 'WEB'}
       </span>
     </div>
   );
@@ -366,8 +350,9 @@ export function ParseWorkbench({ onParsed }: IParseWorkbenchProps): React.JSX.El
   const inputRef = useRef<HTMLInputElement>(null);
   const creatingDownloadRef = useRef(false);
   const download = useDownloadJob();
-  const platformHint = useMemo(() => detectPlatformHint(url), [url]);
-  const canSubmit = Boolean(url.trim() && platformHint && rightsConfirmed && status !== 'probing');
+  const normalizedUrl = useMemo(() => extractVideoUrlFromText(url), [url]);
+  const platformHint = useMemo(() => detectPlatformHint(normalizedUrl ?? ''), [normalizedUrl]);
+  const canSubmit = Boolean(normalizedUrl && platformHint && rightsConfirmed && status !== 'probing');
   const hasActiveDownload = Boolean(
     download.job && ['queued', 'downloading', 'processing'].includes(download.job.status),
   );
@@ -392,14 +377,24 @@ export function ParseWorkbench({ onParsed }: IParseWorkbenchProps): React.JSX.El
     if (probe) resetResult();
   };
 
+  const applyPastedText = (text: string): void => {
+    const extractedUrl = extractVideoUrlFromText(text);
+    if (!extractedUrl) {
+      setClipboardStatus('剪贴板中没有找到有效的 http(s) 视频链接');
+      inputRef.current?.focus();
+      return;
+    }
+    handleUrlChange(extractedUrl);
+    setClipboardStatus(text.trim() === extractedUrl ? '已从剪贴板粘贴' : '已从分享文案提取链接');
+    window.setTimeout(() => setClipboardStatus(''), 1_500);
+  };
+
   const handlePaste = async (): Promise<void> => {
     if (interactionLocked) return;
     try {
       const text = await navigator.clipboard.readText();
       if (!text.trim()) throw new Error('empty');
-      handleUrlChange(text.trim());
-      setClipboardStatus('已从剪贴板粘贴');
-      window.setTimeout(() => setClipboardStatus(''), 1_200);
+      applyPastedText(text);
     } catch {
       setClipboardStatus('无法读取剪贴板，请按 Ctrl+V 粘贴链接');
       inputRef.current?.focus();
@@ -416,12 +411,14 @@ export function ParseWorkbench({ onParsed }: IParseWorkbenchProps): React.JSX.El
 
   const handleSubmit = async (event?: React.FormEvent): Promise<void> => {
     event?.preventDefault();
-    if (!url.trim()) {
+    const submittedUrl = extractVideoUrlFromText(url);
+    if (!submittedUrl) {
       setFieldError('请先粘贴视频链接。');
       inputRef.current?.focus();
       return;
     }
-    if (!platformHint) {
+    const submittedPlatform = detectPlatformHint(submittedUrl);
+    if (!submittedPlatform) {
       setFieldError('暂不支持该平台，或链接格式不正确。');
       inputRef.current?.focus();
       return;
@@ -432,12 +429,13 @@ export function ParseWorkbench({ onParsed }: IParseWorkbenchProps): React.JSX.El
     }
 
     setStatus('probing');
+    if (submittedUrl !== url) setUrl(submittedUrl);
     setProbeStep(1);
     setError(null);
     setFieldError('');
     const stepTimer = window.setTimeout(() => setProbeStep(2), 250);
     try {
-      const result = await createProbe(url.trim());
+      const result = await createProbe(submittedUrl);
       window.clearTimeout(stepTimer);
       setProbeStep(3);
       setProbe(result);
@@ -459,8 +457,13 @@ export function ParseWorkbench({ onParsed }: IParseWorkbenchProps): React.JSX.El
     creatingDownloadRef.current = true;
     setIsCreatingDownload(true);
     try {
-      const response = await createDownload(probe.probeId, selectedId);
-      download.begin(response.job);
+      const recovered = await createDownloadWithProbeRecovery(probe, selectedId);
+      if (recovered.refreshed) {
+        setProbe(recovered.probe);
+        setSelectedId(recovered.optionId);
+        onParsed(recovered.probe.media);
+      }
+      download.begin(recovered.response.job);
     } catch (caught) {
       const apiError = caught instanceof ApiClientError
         ? caught
@@ -519,7 +522,11 @@ export function ParseWorkbench({ onParsed }: IParseWorkbenchProps): React.JSX.El
             autoComplete="off"
             value={url}
             onChange={(event) => handleUrlChange(event.target.value)}
-            placeholder="粘贴 X、YouTube 或其他支持平台的视频链接"
+            onPaste={(event) => {
+              event.preventDefault();
+              applyPastedText(event.clipboardData.getData('text'));
+            }}
+            placeholder="粘贴抖音、快手、X、YouTube 等链接或分享文案"
             aria-describedby="url-help url-feedback"
             aria-invalid={Boolean(fieldError)}
             disabled={interactionLocked}
@@ -543,7 +550,7 @@ export function ParseWorkbench({ onParsed }: IParseWorkbenchProps): React.JSX.El
           ) : null}
         </div>
         <p className="url-help" id="url-help">
-          支持公开链接；私密、付费、DRM 加密或需登录内容不可解析。
+          可识别抖音、快手作品页、分享短链和整段分享文案；仅当平台向匿名访问提供公开源流时可下载。
         </p>
 
         <label className="rights-consent">

@@ -39,8 +39,25 @@ function isPrivateIpv6(address: string): boolean {
   if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
   if (/^fe[89ab]/.test(normalized)) return true;
 
-  const mappedIpv4 = normalized.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-  return mappedIpv4 ? isPrivateIpv4(mappedIpv4) : false;
+  if (normalized.startsWith('::ffff:')) {
+    const dottedIpv4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+    if (dottedIpv4) return isPrivateIpv4(dottedIpv4);
+
+    // WHATWG URL canonicalization turns ::ffff:127.0.0.1 into
+    // ::ffff:7f00:1, so handle the hexadecimal form as well.
+    const hexadecimalIpv4 = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (!hexadecimalIpv4) return true;
+    const high = Number.parseInt(hexadecimalIpv4[1], 16);
+    const low = Number.parseInt(hexadecimalIpv4[2], 16);
+    return isPrivateIpv4([
+      high >>> 8,
+      high & 0xff,
+      low >>> 8,
+      low & 0xff,
+    ].join('.'));
+  }
+
+  return false;
 }
 
 export function isPrivateAddress(address: string): boolean {

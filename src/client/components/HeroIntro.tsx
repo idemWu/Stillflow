@@ -1,6 +1,9 @@
 import { Check, Film, Sparkles, TimerReset } from 'lucide-react';
+import { PLATFORM_DEFINITIONS } from '../../shared/platforms';
 
-const PLATFORM_LABELS = ['YouTube', 'X / Twitter', 'TikTok', 'Instagram', 'Vimeo', 'Bilibili'];
+const PLATFORM_LABELS = PLATFORM_DEFINITIONS.map(({ id, label }) => (
+  id === 'kuaishou' ? `${label} · 公开页` : label
+));
 
 export function HeroIntro(): React.JSX.Element {
   return (
@@ -31,7 +34,6 @@ export function HeroIntro(): React.JSX.Element {
           {PLATFORM_LABELS.map((label) => (
             <span key={label}><Check size={12} />{label}</span>
           ))}
-          <span className="more-platforms">+ 抖音 / 快手</span>
         </div>
       </div>
     </section>
