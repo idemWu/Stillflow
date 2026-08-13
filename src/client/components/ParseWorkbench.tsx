@@ -189,7 +189,8 @@ function DownloadPanel({ job, onCancel, onClear }: IDownloadPanelProps): React.J
       const file = await prepareDownloadFile(job.id, job.fileName ?? 'video.mp4');
       const anchor = document.createElement('a');
       anchor.href = file.url;
-      anchor.download = file.fileName;
+      // The server only adds Content-Disposition for a valid video response.
+      // Omitting `download` prevents a late JSON error from being saved as file.json.
       anchor.style.display = 'none';
       document.body.append(anchor);
       anchor.click();
