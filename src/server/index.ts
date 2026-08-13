@@ -143,9 +143,9 @@ app.get('/api/v1/downloads/:id', (request: Request, response: Response, next: Ne
   }
 });
 
-app.get('/api/v1/downloads/:id/file', (request: Request, response: Response, next: NextFunction) => {
+app.get('/api/v1/downloads/:id/file', async (request: Request, response: Response, next: NextFunction) => {
   try {
-    const { job, filePath } = getDownloadFile(request.params.id);
+    const { job, filePath } = await getDownloadFile(request.params.id);
     response.setHeader('Cache-Control', 'private, no-store, max-age=0');
     response.download(filePath, job.fileName ?? 'video.mp4', (error) => {
       if (error && !response.headersSent) next(error);

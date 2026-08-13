@@ -675,6 +675,17 @@ img {
   transition: transform 150ms ease, background 150ms ease, box-shadow 150ms ease;
 }
 
+.save-file-button:disabled {
+  cursor: wait;
+  opacity: 0.75;
+}
+
+.ready-actions .save-file-error {
+  color: var(--red);
+  justify-content: center;
+  font-weight: 700;
+}
+
 .parse-button {
   margin-top: 13px;
 }
@@ -692,7 +703,7 @@ img {
 
 .parse-button:hover:not(:disabled),
 .export-button:hover:not(:disabled),
-.save-file-button:hover {
+.save-file-button:hover:not(:disabled) {
   background: var(--blue-dark);
   box-shadow: 0 12px 26px rgba(35, 95, 231, 0.28);
   transform: translateY(-1px);

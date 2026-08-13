@@ -133,7 +133,8 @@ export async function fetchTrustedKuaishouMedia(
     }
 
     const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
-    if (contentType && !contentType.startsWith('video/') && contentType !== 'application/octet-stream') {
+    const pathLooksLikeMp4 = safeUrl.pathname.toLowerCase().endsWith('.mp4');
+    if (contentType !== 'video/mp4' && !(contentType === 'application/octet-stream' && pathLooksLikeMp4)) {
       await response.body?.cancel().catch(() => undefined);
       throw new AppError('DOWNLOAD_FAILED', 502);
     }

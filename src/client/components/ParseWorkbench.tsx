@@ -32,7 +32,7 @@ import { detectPlatform, PLATFORM_DEFINITIONS } from '../../shared/platforms';
 import {
   ApiClientError,
   createProbe,
-  getDownloadFileUrl,
+  prepareDownloadFile,
   getHealth,
 } from '../api';
 import { createDownloadWithProbeRecovery } from '../downloadRecovery';
@@ -168,6 +168,8 @@ interface IDownloadPanelProps {
 
 function DownloadPanel({ job, onCancel, onClear }: IDownloadPanelProps): React.JSX.Element {
   const progress = job.progress.percent;
+  const [saveError, setSaveError] = useState<ApiClientError | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const active = ['queued', 'downloading', 'processing'].includes(job.status);
   const statusCopy = {
     queued: ['任务已排队', '马上开始准备文件'],
@@ -178,6 +180,28 @@ function DownloadPanel({ job, onCancel, onClear }: IDownloadPanelProps): React.J
     cancelled: ['导出已取消', '临时文件已清理'],
   } satisfies Record<string, [string, string]>;
   const copy = statusCopy[job.status];
+
+  const handleSave = async (): Promise<void> => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      const file = await prepareDownloadFile(job.id, job.fileName ?? 'video.mp4');
+      const anchor = document.createElement('a');
+      anchor.href = file.url;
+      anchor.download = file.fileName;
+      anchor.style.display = 'none';
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+    } catch (error) {
+      setSaveError(error instanceof ApiClientError
+        ? error
+        : new ApiClientError('视频保存没有完成，请重新导出。', 'DOWNLOAD_FAILED'));
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   return (
     <section className={`download-panel is-${job.status}`} aria-live="polite">
@@ -218,9 +242,11 @@ function DownloadPanel({ job, onCancel, onClear }: IDownloadPanelProps): React.J
 
       {job.status === 'ready' && (
         <div className="ready-actions">
-          <a className="save-file-button" href={getDownloadFileUrl(job.id)} download>
-            <Download size={18} />保存视频<span>{formatBytes(job.fileBytes)}</span>
-          </a>
+          <button className="save-file-button" type="button" onClick={() => void handleSave()} disabled={isSaving}>
+            {isSaving ? <LoaderCircle className="spin" size={18} /> : <Download size={18} />}
+            {isSaving ? '正在保存 MP4…' : '保存视频'}<span>{formatBytes(job.fileBytes)}</span>
+          </button>
+          {saveError && <p className="save-file-error" role="alert">{saveError.message}</p>}
           <p><ShieldCheck size={14} />文件仅临时保留，下载后可安全关闭页面。</p>
         </div>
       )}

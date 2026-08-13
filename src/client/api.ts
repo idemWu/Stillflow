@@ -79,3 +79,75 @@ export function cancelDownload(id: string): Promise<void> {
 export function getDownloadFileUrl(id: string): string {
   return `/api/v1/downloads/${encodeURIComponent(id)}/file`;
 }
+
+function fileNameFromDisposition(disposition: string | null, fallback: string): string {
+  if (!disposition) return fallback;
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      // Try the ordinary filename parameter below.
+    }
+  }
+  const quoted = disposition.match(/filename="([^"]+)"/i)?.[1];
+  return quoted?.trim() || fallback;
+}
+
+export interface IPreparedDownloadFile {
+  url: string;
+  fileName: string;
+}
+
+async function downloadErrorFromResponse(response: Response): Promise<ApiClientError> {
+  let payload: IApiErrorResponse | null = null;
+  try {
+    payload = (await response.json()) as IApiErrorResponse;
+  } catch {
+    // Keep the stable fallback below.
+  }
+  return new ApiClientError(
+    payload?.error.message ?? '视频文件已经失效，请重新导出。',
+    payload?.error.code ?? 'DOWNLOAD_FAILED',
+    payload?.error.requestId ?? response.headers.get('X-Request-Id'),
+  );
+}
+
+export async function prepareDownloadFile(id: string, fallbackFileName: string): Promise<IPreparedDownloadFile> {
+  const url = getDownloadFileUrl(id);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'HEAD',
+      headers: { Accept: 'video/mp4,video/*;q=0.9,application/octet-stream;q=0.8' },
+    });
+  } catch {
+    throw new ApiClientError('无法连接净流服务，请确认服务仍在运行。', 'NETWORK_ERROR');
+  }
+
+  if (!response.ok) {
+    try {
+      const errorResponse = await fetch(url, {
+        headers: { Accept: 'application/json' },
+      });
+      throw await downloadErrorFromResponse(errorResponse);
+    } catch (error) {
+      if (error instanceof ApiClientError) throw error;
+    }
+    throw await downloadErrorFromResponse(response);
+  }
+
+  const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  if (contentType !== 'video/mp4' && contentType !== 'application/octet-stream') {
+    throw new ApiClientError('服务器没有返回 MP4 视频，请重新导出。', 'DOWNLOAD_FAILED');
+  }
+
+  const fallback = fallbackFileName.toLowerCase().endsWith('.mp4')
+    ? fallbackFileName
+    : `${fallbackFileName || 'video'}.mp4`;
+  const fileName = fileNameFromDisposition(response.headers.get('content-disposition'), fallback);
+  return {
+    url,
+    fileName: fileName.toLowerCase().endsWith('.mp4') ? fileName : `${fileName}.mp4`,
+  };
+}

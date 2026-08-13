@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ICreateDownloadResponse, IMediaFormat, IProbeResponse } from '../src/shared/types.js';
-import { ApiClientError } from '../src/client/api.js';
+import { ApiClientError, prepareDownloadFile } from '../src/client/api.js';
 import { createDownloadWithProbeRecovery } from '../src/client/downloadRecovery.js';
 import { extractVideoUrlFromText } from '../src/shared/linkInput.js';
 import { findEquivalentMediaFormat } from '../src/shared/mediaSelection.js';
@@ -99,6 +99,12 @@ test('limits downloads to one media item without yt-dlp max-downloads exit code'
   const args = buildSingleMediaArguments();
   assert.ok(args.includes('--no-playlist'));
   assert.ok(!args.includes('--max-downloads'));
+  assert.deepEqual(args.slice(args.indexOf('--merge-output-format'), args.indexOf('--merge-output-format') + 2), [
+    '--merge-output-format', 'mp4',
+  ]);
+  assert.deepEqual(args.slice(args.indexOf('--remux-video'), args.indexOf('--remux-video') + 2), [
+    '--remux-video', 'mp4',
+  ]);
 });
 
 test('matches the same quality after an expired probe is refreshed', () => {
@@ -224,6 +230,56 @@ test('stops an expired-probe recovery when the selected quality disappeared', as
   );
 
   assert.equal(downloadCalls, 1);
+});
+
+test('does not save a JSON API error as a video file', async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === 'HEAD') {
+      return new Response(null, { status: 404, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({
+      error: {
+        code: 'JOB_NOT_FOUND',
+        message: '文件已经失效。',
+        requestId: 'request-1',
+      },
+    }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    prepareDownloadFile('expired-job', 'video.mp4'),
+    (error: unknown) => (
+      error instanceof ApiClientError
+      && error.code === 'JOB_NOT_FOUND'
+      && error.message === '文件已经失效。'
+    ),
+  );
+});
+
+test('keeps the MP4 filename and media payload from a successful file response', async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => new Response(
+    init?.method === 'HEAD' ? null : new Uint8Array([0, 0, 0, 24]), {
+    status: 200,
+    headers: {
+      'Content-Type': 'video/mp4',
+      'Content-Disposition': "attachment; filename*=UTF-8''sample%20video.mp4",
+    },
+  })) as typeof fetch;
+
+  const file = await prepareDownloadFile('ready-job', 'fallback.mp4');
+  assert.equal(file.fileName, 'sample video.mp4');
+  assert.equal(file.url, '/api/v1/downloads/ready-job/file');
 });
 
 function kuaishouFixture(detailId: string, downloadUrl = 'https://video.kwaicdn.com/source.mp4'): string {

@@ -89,7 +89,7 @@ export function buildFormatExpression(rawFormatId: string, hasAudio: boolean): s
 }
 
 export function buildSingleMediaArguments(): string[] {
-  return ['--no-playlist'];
+  return ['--no-playlist', '--merge-output-format', 'mp4', '--remux-video', 'mp4'];
 }
 
 function parseProgressLine(job: IInternalJob, line: string): void {
@@ -386,8 +386,6 @@ async function runJob(job: IInternalJob): Promise<void> {
         '160',
         '--format',
         formatExpression,
-        '--merge-output-format',
-        'mp4',
         '--output',
         outputTemplate,
       ];
@@ -501,12 +499,19 @@ export function getDownloadJob(id: unknown): IDownloadJob {
   return publicJob(job);
 }
 
-export function getDownloadFile(id: unknown): { job: IDownloadJob; filePath: string } {
+export async function getDownloadFile(id: unknown): Promise<{ job: IDownloadJob; filePath: string }> {
   if (typeof id !== 'string') throw new AppError('JOB_NOT_FOUND', 404);
   const job = jobs.get(id);
   if (!job) throw new AppError('JOB_NOT_FOUND', 404);
   if (job.public.status !== 'ready' || !job.filePath || !isPathInside(job.directory, job.filePath)) {
     throw new AppError('JOB_NOT_READY', 409);
+  }
+  try {
+    const info = await stat(job.filePath);
+    if (!info.isFile() || info.size === 0) throw new AppError('JOB_NOT_FOUND', 404);
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError('JOB_NOT_FOUND', 404);
   }
   return { job: publicJob(job), filePath: job.filePath };
 }
